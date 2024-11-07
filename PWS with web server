@@ -1,0 +1,316 @@
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+#include "SPIFFS.h" 
+
+// Replace with your network credentials
+const char* ssid = "Satellite Lab";
+const char* password = "S@TelliTe@2024";
+
+// Define the pins and sensor type
+const int soilMoisturePin = 34;
+const int dhtPin = 5; // Pin where DHT11 is connected
+#define DHT_TYPE DHT11
+
+DHT dht(dhtPin, DHT_TYPE);
+
+// Create an AsyncWebServer object on port 80
+AsyncWebServer server(80);
+
+
+// Create an EventSource object for SSE
+AsyncEventSource events("/events");
+
+// Define the HTML content for the web page
+const char* indexHTML = R"rawliteral(
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>ESP IOT DASHBOARD</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" type="image/png" href="favicon.png">
+    <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.7.2/css/all.css" integrity="sha384-fnmOCqbTlWIlj8LyTjo7mOUStjsKC4pOpQbqyi7RrhN7udi9RwhKkMHpvLbHG9Sr" crossorigin="anonymous">
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <script src="http://cdn.rawgit.com/Mikhus/canvas-gauges/gh-pages/download/2.1.7/all/gauge.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        background-color: #f1f1f1;
+      }
+
+      .topnav {
+        background-color: #333;
+        color: white;
+        padding: 15px;
+        text-align: center;
+      }
+
+      .content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding-top: 30px; /* Space from the top */
+      }
+
+      .card-grid {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 60px; /* Space between cards */
+      }
+
+      .card {
+        background-color: white;
+        padding: 20px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        border-radius: 8px;
+        text-align: center;
+        min-width: 200px; /* Ensure cards have a minimum width */
+      }
+
+      .card-title {
+        font-size: 18px;
+        margin-bottom: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topnav">
+      <h1>ESP WEB SERVER GAUGES</h1>
+    </div>
+    <div class="content">
+      <div class="card-grid">
+        <div class="card">
+          <p class="card-title">Temperature</p>
+          <canvas id="gauge-temperature"></canvas>
+        </div>
+        <div class="card">
+          <p class="card-title">Soil Moisture</p>
+          <canvas id="gauge-moisture"></canvas>
+        </div>
+      </div>
+    </div>
+    <script>
+      // Create Temperature Gauge
+      var gaugeTemp = new LinearGauge({
+        renderTo: 'gauge-temperature',
+        width: 120,
+        height: 400,
+        units: "Temperature C",
+        minValue: 0,
+        startAngle: 90,
+        ticksAngle: 180,
+        maxValue: 40,
+        colorValueBoxRect: "#049faa",
+        colorValueBoxRectEnd: "#049faa",
+        colorValueBoxBackground: "#f1fbfc",
+        valueDec: 2,
+        valueInt: 2,
+        majorTicks: [
+            "0",
+            "5",
+            "10",
+            "15",
+            "20",
+            "25",
+            "30",
+            "35",
+            "40"
+        ],
+        minorTicks: 4,
+        strokeTicks: true,
+        highlights: [
+            {
+                "from": 30,
+                "to": 40,
+                "color": "rgba(200, 50, 50, .75)"
+            }
+        ],
+        colorPlate: "#fff",
+        colorBarProgress: "#CC2936",
+        colorBarProgressEnd: "#049faa",
+        borderShadowWidth: 0,
+        borders: false,
+        needleType: "arrow",
+        needleWidth: 2,
+        needleCircleSize: 7,
+        needleCircleOuter: true,
+        needleCircleInner: false,
+        animationDuration: 1500,
+        animationRule: "linear",
+        barWidth: 10,
+      }).draw();
+        
+      // Create Soil Moisture Gauge
+      var gaugeMoisture = new RadialGauge({
+        renderTo: 'gauge-moisture',
+        width: 300,
+        height: 300,
+        units: "Moisture (%)",
+        minValue: 0,
+        maxValue: 100,
+        colorValueBoxRect: "#049faa",
+        colorValueBoxRectEnd: "#049faa",
+        colorValueBoxBackground: "#f1fbfc",
+        valueInt: 2,
+        majorTicks: [
+            "0",
+            "20",
+            "40",
+            "60",
+            "80",
+            "100"
+        ],
+        minorTicks: 4,
+        strokeTicks: true,
+        highlights: [
+            {
+                "from": 80,
+                "to": 100,
+                "color": "#03C0C1"
+            }
+        ],
+        colorPlate: "#fff",
+        borderShadowWidth: 0,
+        borders: false,
+        needleType: "line",
+        colorNeedle: "#007F80",
+        colorNeedleEnd: "#007F80",
+        needleWidth: 2,
+        needleCircleSize: 3,
+        colorNeedleCircleOuter: "#007F80",
+        needleCircleOuter: true,
+        needleCircleInner: false,
+        animationDuration: 1500,
+        animationRule: "linear"
+      }).draw();
+
+      // Function to get current readings on the webpage when it loads for the first time
+      function getReadings(){
+        var xhr = new XMLHttpRequest();
+        xhr.onreadystatechange = function() {
+          if (this.readyState == 4 && this.status == 200) {
+            var myObj = JSON.parse(this.responseText);
+            console.log(myObj);
+            var temp = myObj.temperature;
+            var moisture = myObj.moisture;
+            gaugeTemp.value = temp;
+            gaugeMoisture.value = moisture;
+          }
+        }; 
+        xhr.open("GET", "/readings", true);
+        xhr.send();
+      }
+
+      window.addEventListener('load', getReadings);
+
+      if (!!window.EventSource) {
+        var source = new EventSource('/events');
+        
+        source.addEventListener('open', function(e) {
+          console.log("Events Connected");
+        }, false);
+
+        source.addEventListener('error', function(e) {
+          if (e.target.readyState != EventSource.OPEN) {
+            console.log("Events Disconnected");
+          }
+        }, false);
+        
+        source.addEventListener('message', function(e) {
+          console.log("message", e.data);
+        }, false);
+        
+        source.addEventListener('new_readings', function(e) {
+          console.log("new_readings", e.data);
+          var myObj = JSON.parse(e.data);
+          console.log(myObj);
+          gaugeTemp.value = myObj.temperature;
+          gaugeMoisture.value = myObj.moisture;
+        }, false);
+      }
+    </script>
+  </body>
+</html>
+
+
+)rawliteral";
+
+void setup() {
+  // Start Serial communication
+  Serial.begin(115200);
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  
+  Serial.println("Connected to WiFi");
+  
+  // Print the IP address
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Initialize DHT sensor
+  dht.begin();
+
+  
+
+  // Serve the web page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/html", indexHTML);
+  });
+
+    // Serve gauge.min.js from SPIFFS
+  server.on("/gauge.min.js", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(SPIFFS, "/gauge.min.js", "application/javascript");
+});
+
+
+  // Handle request for sensor readings
+  server.on("/readings", HTTP_GET, [](AsyncWebServerRequest *request){
+    int moistureValue = analogRead(soilMoisturePin);
+    float moisturePercentage = map(moistureValue, 4095, 0, 0, 100);
+
+    float temperature = dht.readTemperature();
+    if (isnan(temperature)) {
+      temperature = 0; // Handle the case where reading fails
+    }
+    
+    String json = "{\"temperature\":" + String(temperature) + ",\"moisture\":" + String(moisturePercentage) + "}";
+    request->send(200, "application/json", json);
+  });
+
+  // Handle Server-Sent Events
+  events.onConnect([](AsyncEventSourceClient *client){
+    Serial.println("Client connected");
+  });
+  
+  server.addHandler(&events);
+
+  // Start the server
+  server.begin();
+}
+
+void loop() {
+  // Continuously read sensors and send data via SSE
+  int moistureValue = analogRead(soilMoisturePin);
+  float moisturePercentage = map(moistureValue, 4095, 0, 0, 100);
+
+  float temperature = dht.readTemperature();
+  if (isnan(temperature)) {
+    temperature = 0; // Handle the case where reading fails
+  }
+  
+  String json = "{\"temperature\":" + String(temperature) + ",\"moisture\":" + String(moisturePercentage) + "}";
+  events.send(json.c_str(), "new_readings", millis());
+
+  delay(2000); // Update every 2 seconds
+}
